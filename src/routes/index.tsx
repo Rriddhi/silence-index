@@ -15,13 +15,17 @@ import {
   CalendarX,
 } from "lucide-react";
 import {
-  DEFAULT_DOSSIER,
   SUGGESTED_QUERIES,
   DATA_SOURCES,
   type Crisis,
+  type Dossier,
   type NeglectCategory,
 } from "@/lib/dossier-data";
-import { fetchSilenceIndexChat } from "@/lib/silence-index-api";
+import {
+  getDemoDossierForQuery,
+  getDemoChatResponse,
+  LIBYA_DETAIL_SECTION,
+} from "@/lib/demo-dossier";
 
 
 export const Route = createFileRoute("/")({
@@ -57,28 +61,14 @@ interface ChatMsg {
 }
 
 
-const FOLLOWUP_CHIPS = [
-  "Why does Libya rank above South Sudan?",
-  "What should I tell a Nordic donor?",
-  "Export as briefing note",
-];
-
-const FOLLOWUP_ANSWERS: Record<string, string> = {
-  "Why does Libya rank above South Sudan?":
-    "Libya's composite (64.6) edges South Sudan (60.2) because its coverage collapsed further below its historical baseline and the worsening multiplier is applied to a smaller PIN — concentrating unmet need per capita. South Sudan has larger absolute PIN but a comparatively higher 24.5% coverage.",
-  "What should I tell a Nordic donor?":
-    "Lead with chronic, measurable gaps that match Nordic priorities: Libya nutrition (child-survival framing), Zimbabwe shelter (six-year underfunding signal), and the Venezuela onward-displacement corridors. Frame as protection-of-civilians financing, not emergency relief.",
-  "Export as briefing note":
-    "Export queued. A two-page PDF briefing note will be generated from this dossier — including the top 10 crises, silence detector signals, and the advisory recommendation block.",
-};
+const QUERY_DELAY_MS = 1400;
 
 function SilenceIndex() {
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [dossierKey, setDossierKey] = useState(0);
   const [hasDossier, setHasDossier] = useState(false);
-  const [useDemoDossier, setUseDemoDossier] = useState(false);
-  const [dossierText, setDossierText] = useState<string | null>(null);
+  const [activeDossier, setActiveDossier] = useState<Dossier | null>(null);
   const [lastQuery, setLastQuery] = useState("");
   const [chat, setChat] = useState<ChatMsg[]>([]);
 
@@ -91,52 +81,25 @@ function SilenceIndex() {
     setLastQuery(q);
 
     const isFirstDossier = !hasDossier;
-    const responseText = await fetchSilenceIndexChat(q);
+    await new Promise((r) => setTimeout(r, QUERY_DELAY_MS));
 
-    if (isFirstDossier) {
-      if (responseText) {
-        setDossierText(responseText);
-        setUseDemoDossier(false);
-        setChat((prev) => [
-          ...prev,
-          {
-            role: "assistant",
-            text: "Dossier generated — see the briefing on the left. Ask a follow-up below to dig deeper.",
-            isDossierPointer: true,
-          },
-        ]);
-      } else {
-        setDossierText(null);
-        setUseDemoDossier(true);
-        setChat((prev) => [
-          ...prev,
-          {
-            role: "assistant",
-            text: "Live index unavailable — showing the demo briefing on the left. Ask a follow-up below to dig deeper.",
-            isDossierPointer: true,
-          },
-        ]);
-      }
-      setHasDossier(true);
-      setDossierKey((k) => k + 1);
-    } else {
-      const answer =
-        responseText ??
-        FOLLOWUP_ANSWERS[q] ??
-        "Cross-referencing with the active dossier: the index suggests this is driven primarily by coverage gaps relative to severity. Verify with country teams before relaying.";
-      setChat((prev) => [...prev, { role: "assistant", text: answer }]);
-      if (responseText) {
-        setDossierText(responseText);
-        setUseDemoDossier(false);
-        setDossierKey((k) => k + 1);
-      }
-    }
+    const dossier = getDemoDossierForQuery(q);
+    setActiveDossier(dossier);
+    setHasDossier(true);
+    setDossierKey((k) => k + 1);
+
+    const answer = getDemoChatResponse(q, dossier, isFirstDossier);
+    setChat((prev) => [
+      ...prev,
+      {
+        role: "assistant",
+        text: answer,
+        isDossierPointer: true,
+      },
+    ]);
 
     setLoading(false);
   };
-
-  const chips = hasDossier ? FOLLOWUP_CHIPS : SUGGESTED_QUERIES;
-  const chipsLabel = hasDossier ? "Follow-up suggestions" : "Start with a question";
 
   // Auto-run a mock query on first mount so testers see the dossier immediately
   useEffect(() => {
@@ -152,10 +115,10 @@ function SilenceIndex() {
           <div className="flex items-baseline gap-3">
             <span className="eyebrow">Dossier</span>
             <span className="text-[12px] text-muted-foreground">
-              {hasDossier
-                ? "Generated just now"
-                : loading
-                  ? "Generating…"
+              {loading
+                ? "Querying crisis database"
+                : hasDossier
+                  ? "Generated just now"
                   : "Awaiting query"}
             </span>
           </div>
@@ -164,10 +127,12 @@ function SilenceIndex() {
           <div className="px-8 py-8">
             {loading ? (
               <LoadingState />
-            ) : hasDossier ? useDemoDossier ? (
-              <DossierView key={dossierKey} />
-            ) : (
-              <ApiDossierView key={dossierKey} query={lastQuery} text={dossierText ?? ""} />
+            ) : hasDossier && activeDossier ? (
+              <DossierView
+                key={dossierKey}
+                dossier={activeDossier}
+                showLibyaDetail={/\blibya\b/i.test(lastQuery)}
+              />
             ) : (
               <EmptyDossier />
             )}
@@ -190,13 +155,21 @@ function SilenceIndex() {
               </div>
             </div>
           </div>
-          <div className="flex items-center gap-1.5 text-[10.5px] text-muted-foreground">
-            <span className="relative flex h-1.5 w-1.5">
-              <span className="absolute inset-0 rounded-full bg-[color:var(--color-moderate)] opacity-60 animate-ping" />
-              <span className="relative h-1.5 w-1.5 rounded-full bg-[color:var(--color-moderate)]" />
+          <div className="flex items-center gap-2 text-[10.5px] text-muted-foreground">
+            <span
+              className="inline-flex items-center gap-1 rounded-sm border px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-[0.14em] text-[color:var(--color-amber)] border-[color:var(--color-amber)]/45 bg-[color:var(--color-amber)]/10"
+              title="Prototype UI using curated crisis intelligence data"
+            >
+              Demo mode
             </span>
-            <Database className="h-3 w-3" />
-            Databricks
+            <span className="flex items-center gap-1.5">
+              <span className="relative flex h-1.5 w-1.5">
+                <span className="absolute inset-0 rounded-full bg-[color:var(--color-moderate)] opacity-60 animate-ping" />
+                <span className="relative h-1.5 w-1.5 rounded-full bg-[color:var(--color-moderate)]" />
+              </span>
+              <Database className="h-3 w-3" />
+              Databricks
+            </span>
           </div>
         </div>
 
@@ -229,9 +202,9 @@ function SilenceIndex() {
 
         {/* Chips + single input */}
         <div className="px-5 pt-3 pb-4 border-t border-border bg-[color:var(--color-panel)]/60">
-          <div className="eyebrow-muted text-[9px] mb-2">{chipsLabel}</div>
+          <div className="eyebrow-muted text-[9px] mb-2">Suggested queries</div>
           <div className="flex flex-wrap gap-1.5 mb-3">
-            {chips.map((c) => (
+            {SUGGESTED_QUERIES.map((c) => (
               <button
                 key={c}
                 onClick={() => submit(c)}
@@ -388,54 +361,30 @@ function FooterStat({
 
 function LoadingState() {
   return (
-    <div className="py-16 flex flex-col items-center text-center">
-      <div className="flex gap-1.5 mb-4">
-        <span className="dot h-2 w-2 rounded-full bg-primary" />
-        <span className="dot h-2 w-2 rounded-full bg-primary" style={{ animationDelay: "0.15s" }} />
-        <span className="dot h-2 w-2 rounded-full bg-primary" style={{ animationDelay: "0.3s" }} />
+    <div className="py-16 flex flex-col items-start">
+      <div className="flex items-center gap-2 text-[15px] text-foreground/90 font-medium">
+        <span>Querying crisis database</span>
+        <span className="inline-flex gap-1 pl-0.5">
+          <span className="dot h-2 w-2 rounded-full bg-primary" />
+          <span className="dot h-2 w-2 rounded-full bg-primary" style={{ animationDelay: "0.15s" }} />
+          <span className="dot h-2 w-2 rounded-full bg-primary" style={{ animationDelay: "0.3s" }} />
+        </span>
       </div>
-      <div className="text-[13px] text-muted-foreground">
-        Querying crisis database…
-      </div>
-      <div className="mt-1 text-[11px] text-muted-foreground/70">
-        Cross-referencing severity, funding coverage and HRP status
-      </div>
+      <p className="mt-3 text-[13px] text-muted-foreground max-w-md leading-relaxed">
+        Cross-referencing severity, funding coverage, HRP status, and silence signals
+        across 758 tracked crises.
+      </p>
     </div>
   );
 }
 
-function ApiDossierView({ query, text }: { query: string; text: string }) {
-  return (
-    <article className="animate-dossier">
-      <header className="border-b border-border pb-8">
-        <div className="eyebrow mb-3">Dossier · Generated just now</div>
-        <h2 className="font-serif text-[28px] leading-[1.2] font-semibold max-w-3xl">
-          Briefing response
-        </h2>
-        {query ? (
-          <p className="mt-3 text-[13px] text-muted-foreground max-w-2xl">
-            <span className="uppercase tracking-[0.12em] text-[10px]">Query · </span>
-            {query}
-          </p>
-        ) : null}
-      </header>
-      <div className="mt-8 text-[15px] leading-relaxed text-foreground/90 max-w-3xl whitespace-pre-wrap">
-        {text}
-      </div>
-      <footer className="mt-12 pt-6 border-t border-border">
-        <div className="eyebrow-muted mb-2">Data transparency</div>
-        <p className="text-[12px] leading-relaxed text-muted-foreground max-w-3xl">
-          Response generated by the Silence Index agent on Databricks. Composite blends
-          INFORM severity, OCHA FTS coverage and HNO/GCSI signals. Corroborate with
-          country teams before acting.
-        </p>
-      </footer>
-    </article>
-  );
-}
-
-function DossierView() {
-  const d = DEFAULT_DOSSIER;
+function DossierView({
+  dossier: d,
+  showLibyaDetail,
+}: {
+  dossier: Dossier;
+  showLibyaDetail?: boolean;
+}) {
   return (
     <article className="animate-dossier">
       {/* Header */}
@@ -465,6 +414,21 @@ function DossierView() {
           </div>
         ))}
       </section>
+
+      {showLibyaDetail && (
+        <section className="mt-8 border border-primary/35 bg-[color:var(--color-panel)] rounded-md p-6">
+          <div className="eyebrow mb-2">Deep dive</div>
+          <h3 className="font-serif text-[20px] font-semibold">{LIBYA_DETAIL_SECTION.headline}</h3>
+          <ul className="mt-4 space-y-2.5">
+            {LIBYA_DETAIL_SECTION.bullets.map((b) => (
+              <li key={b} className="flex gap-2.5 text-[13px] leading-relaxed text-foreground/85">
+                <span className="text-primary mt-0.5">›</span>
+                <span>{b}</span>
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
 
       {/* Need scorer */}
       <Section eyebrow="Need scorer" title="Ranked by composite severity & funding gap">
@@ -695,21 +659,27 @@ function CrisisCard({ c }: { c: Crisis }) {
             )}
 
             <button
+              type="button"
+              aria-expanded={open}
               onClick={() => setOpen((v) => !v)}
               className="w-full pt-4 border-t border-border/40 flex items-center justify-between group/btn"
             >
               <span className="text-[10px] font-bold uppercase tracking-[0.2em] text-muted-foreground group-hover/btn:text-primary transition-colors">
-                {open ? "Hide score breakdown" : "How was this scored?"}
+                How was this scored?
               </span>
               <ChevronDown
                 className={
-                  "h-4 w-4 text-muted-foreground/60 group-hover/btn:text-primary transition-all " +
-                  (open ? "rotate-180" : "")
+                  "h-4 w-4 text-muted-foreground/60 group-hover/btn:text-primary transition-transform duration-300 ease-in-out " +
+                  (open ? "rotate-180" : "rotate-0")
                 }
               />
             </button>
 
-            {open && <ScoreBreakdown c={c} />}
+            <div className="score-breakdown-grid" data-open={open ? "true" : "false"}>
+              <div className="score-breakdown-inner">
+                <ScoreBreakdown c={c} />
+              </div>
+            </div>
           </div>
         </div>
       </div>
@@ -778,7 +748,7 @@ function ScoreBreakdown({ c }: { c: Crisis }) {
     histAvg != null && c.coverage != null ? c.coverage - histAvg : null;
 
   return (
-    <div className="mt-4 border-t border-border pt-5 space-y-6">
+    <div className="border-t border-border pt-5 pb-1 space-y-6">
       {/* Gap score */}
       <BreakdownBlock title="Gap score breakdown">
         <Row label="Severity" value={`${c.severity.toFixed(2)} / 5`} />
